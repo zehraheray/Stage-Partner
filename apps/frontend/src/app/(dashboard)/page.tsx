@@ -80,7 +80,7 @@ export default function DashboardPage() {
     }
   };
 
-  // Bekleyen Mesaja Puan Verildiğinde Çalışan Fonksiyon
+// Bekleyen Mesaja Puan Verildiğinde Çalışan Fonksiyon
   const handlePendingScore = async (msgIndex: number, score: number) => {
     const pendingMsg = chatHistory[msgIndex];
     if (!pendingMsg || !pendingMsg.isPending) return;
@@ -88,43 +88,54 @@ export default function DashboardPage() {
     // Arayüzde bekleyen durumunu kaldır
     const newHistory = [...chatHistory];
     newHistory[msgIndex].isPending = false;
+    setChatHistory(newHistory);
 
     if (score >= 3) {
       // 3 ve Üzeri: ONAYLANDI -> DB'ye Kaydet ve Loglara Düşür
-      setChatHistory(newHistory);
       try {
         const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+        
         // 1. Logu oluştur
         const res = await fetch(`${apiURL}/llm/log`, {
           method: 'POST',
           headers: getAuthHeaders(),
-          credentials: 'omit',
           body: JSON.stringify({ prompt: pendingMsg.promptContext, response: pendingMsg.content, latency_ms: pendingMsg.latency })
         });
         
-        if (res.ok) {
-           // Bizim backend ID dönmediği için en son logları çekip en üsttekini puanlıyoruz
-           const logsRes = await fetch(`${apiURL}/llm/logs`, { headers: getAuthHeaders(), cache: 'no-store' });
-           const logsData = await logsRes.json();
-           if(logsData?.data?.length > 0) {
-              const latestLogId = logsData.data[logsData.data.length - 1].id;
-              // 2. Puanı ver
-              await fetch(`${apiURL}/llm/score`, {
-                method: 'PUT',
-                headers: getAuthHeaders(),
-                body: JSON.stringify({ id: latestLogId, score })
-              });
-           }
-           fetchLogs();
+        if (!res.ok) {
+          alert(`HATA: Replik veritabanına kaydedilemedi! (Hata Kodu: ${res.status}). Oturumunuz kapanmış olabilir, çıkış yapıp tekrar giriş yapmayı deneyin.`);
+          return;
         }
+
+        // Backend'in döndüğü yanıttan direkt yeni oluşturulan ID'yi alıyoruz (En güvenli yöntem)
+        const responseData = await res.json();
+        const createdId = responseData?.data?.id || responseData?.id;
+
+        if (createdId) {
+          // 2. Puanı ver
+          const scoreRes = await fetch(`${apiURL}/llm/score`, {
+            method: 'PUT',
+            headers: getAuthHeaders(),
+            body: JSON.stringify({ id: createdId, score })
+          });
+
+          if (!scoreRes.ok) {
+             console.error("Puan atanamadı:", scoreRes.status);
+          }
+        } else {
+          console.error("Backend kayıt yaptı ama ID dönmedi:", responseData);
+        }
+        
+        fetchLogs(); // Sağ paneli yenile
       } catch (e) {
-        console.error(e);
+        console.error("Ağ hatası oluştu:", e);
+        alert("Sunucuya bağlanılamadı. Console'u kontrol edin.");
       }
     } else {
       // 2 ve Altı: REDDEDİLDİ -> Yeniden Üretim İste
       const rejectNote = `[Yönetmen Notu: Bu replik reddedildi (${score} Yıldız). Aynı bağlamda daha güçlü, duygusal ve tamamen farklı bir alternatif replik yaz.]`;
       newHistory.push({ role: 'user', content: rejectNote });
-      setChatHistory(newHistory);
+      setChatHistory([...newHistory]);
       
       // Otomatik olarak asistanı tekrar tetikle
       handleGenerate(rejectNote);
