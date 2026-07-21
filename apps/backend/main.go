@@ -3,50 +3,63 @@ package main
 import (
 	"net/http"
 	"github.com/gin-gonic/gin"
+	"stagepartner/backend/config"
+	"stagepartner/backend/models"
 )
 
 func main() {
+	// 1. Veritabanına Bağlan
+	config.ConnectDatabase()
+
+	// 2. Tabloları Otomatik Oluştur (Migration)
+	config.DB.AutoMigrate(&models.LlmLog{})
+
 	r := gin.Default()
 
-	// [Cmn] Common (Ortak) Endpoints
+	// Healthcheck Endpoint
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "Render MCP Healthcheck: Live Live Live!"})
 	})
-	r.GET("/user/profile", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"message": "User profile"}) })
 
-	// Auth Endpoints [8 EP]
-	auth := r.Group("/auth")
-	{
-		auth.POST("/register", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Register"}) })
-		auth.POST("/login", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Login"}) })
-		auth.POST("/logout", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Logout"}) })
-		auth.POST("/refresh", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Refresh Token"}) })
-		auth.POST("/password/forgot", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Forgot Password"}) })
-		auth.POST("/password/reset", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Reset Password"}) })
-		auth.POST("/password/change", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Change Password"}) })
-		auth.POST("/verify-email", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Verify Email"}) })
-	}
+	// Logları Kaydetme (POST /llm/log/raw-output)
+	r.POST("/llm/log/raw-output", func(c *gin.Context) {
+		var input models.LlmLog
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		config.DB.Create(&input)
+		c.JSON(http.StatusOK, gin.H{"data": input})
+	})
 
-	// Config Endpoints [2 EP]
-	config := r.Group("/config")
-	{
-		config.GET("/prompts", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Get Config"}) })
-		config.PUT("/model-settings", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Update Config"}) })
-	}
+	// Logları Listeleme (GET /llm/logs)
+	r.GET("/llm/logs", func(c *gin.Context) {
+		var logs []models.LlmLog
+		config.DB.Order("id desc").Find(&logs)
+		c.JSON(http.StatusOK, gin.H{"data": logs})
+	})
 
-	// WEB MLC-LLM Monitoring & Scoring Endpoints [8 EP]
-	llm := r.Group("/llm")
-	{
-		llm.POST("/session/start", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Start Session"}) })
-		llm.POST("/log/prompt", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Log User Prompt"}) })
-		llm.POST("/log/raw-output", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Log Gemma Raw Output & Latency"}) })
-		llm.POST("/score/decision", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Save Decision Score (1-5)"}) })
-		llm.GET("/logs", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Get All Logs"}) })
-		llm.GET("/score/analytics", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Get Scoring Analytics"}) })
-		llm.GET("/leaderboard", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Get Prompt/Score Stats"}) })
-		llm.DELETE("/log/:id", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"action": "Archive/Delete Log"}) })
-	}
+	// Decision Score Güncelleme (POST /llm/score/decision)
+	r.POST("/llm/score/decision", func(c *gin.Context) {
+		type ScoreInput struct {
+			ID    uint `json:"id" binding:"required"`
+			Score int  `json:"score" binding:"required"`
+		}
+		var input ScoreInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		
+		var logRecord models.LlmLog
+		if err := config.DB.First(&logRecord, input.ID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Kayit bulunamadi"})
+			return
+		}
 
-	// Port 8080'de ayağa kaldır (Render.com varsayılan portlarından biri)
+		config.DB.Model(&logRecord).Update("score", input.Score)
+		c.JSON(http.StatusOK, gin.H{"message": "Skor basariyla güncellendi", "data": logRecord})
+	})
+
 	r.Run(":8080")
 }

@@ -9,11 +9,11 @@ setup:
 
 # Veritabanını ayağa kaldır (Arka planda)
 db-up:
-	docker-compose up -d
+	docker compose up -d
 
 # Veritabanını durdur
 db-down:
-	docker-compose down
+	docker compose down
 
 # Sadece Go Backend'i çalıştır
 run-api:
@@ -25,6 +25,6 @@ run-web:
 
 # Temizlik
 clean:
-	docker-compose down -v
+	docker compose down -v
 	rm -rf apps/frontend/node_modules
 	rm -rf apps/frontend/.next
