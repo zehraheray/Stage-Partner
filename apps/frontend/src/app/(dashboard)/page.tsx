@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { CreateMLCEngine } from "@mlc-ai/web-llm";
 
 interface LogItem {
   id: string;
@@ -19,7 +20,6 @@ interface User {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [status, setStatus] = useState("Sistem Hazır (Edge AI Simülasyonu)");
   const [promptInput, setPromptInput] = useState("");
   const [currentResponse, setCurrentResponse] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
@@ -28,17 +28,20 @@ export default function DashboardPage() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Web-LLM State'leri
+  const [engine, setEngine] = useState<any>(null);
+  const [isModelLoaded, setIsModelLoaded] = useState(false);
+  const [loadProgress, setLoadProgress] = useState("");
+  const [isModelLoading, setIsModelLoading] = useState(false);
+
   // JWT Token Kontrolü (Auth Guard)
   useEffect(() => {
     const token = localStorage.getItem("stage_token");
-
     if (!token) {
-      // Token yoksa doğrudan Login sayfasına yönlendir
       router.push("/login");
       return;
     }
 
-    // Token varsa profil verilerini doğrula
     fetch("http://localhost:8080/user/profile", {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -52,7 +55,6 @@ export default function DashboardPage() {
         fetchLogs();
       })
       .catch(() => {
-        // Token geçersizse temizle ve Login'e yönlendir
         localStorage.removeItem("stage_token");
         router.push("/login");
       });
@@ -85,55 +87,85 @@ export default function DashboardPage() {
     router.push("/login");
   };
 
-  // Prompt Çalıştırma ve Backend'e Kaydetme
-  const handleGenerate = async () => {
-    if (!promptInput.trim() || isGenerating) return;
+  // --- WEB-LLM GEMMA MODEL YÜKLEME ---
+  const initModel = async () => {
+    if (!("gpu" in navigator)) {
+      alert("Tarayıcınız WebGPU desteklemiyor! Lütfen güncel bir Chrome veya Edge kullanın.");
+      return;
+    }
 
-    setIsGenerating(true);
-    setCurrentResponse("");
-    const startTime = performance.now();
+    setIsModelLoading(true);
+    try {
+      // Gemma 2B modelini kullanıyoruz (WebLLM uyumlu Q4 versiyonu)
+      const selectedModel = "gemma-2b-it-q4f16_1-MLC";
+      
+      const newEngine = await CreateMLCEngine(selectedModel, {
+        initProgressCallback: (progress) => {
+          setLoadProgress(progress.text);
+        },
+      });
 
-    setTimeout(async () => {
-      const endTime = performance.now();
-      const latency = Math.round(endTime - startTime) + 320;
-      const mockResponse = `[Gemma 2B Raw Output]: "${promptInput}" prompt'u analiz edildi. Filtre uygulanmamış ham yanıt üretildi.`;
-
-      setCurrentResponse(mockResponse);
-
-      try {
-        const res = await fetch("http://localhost:8080/llm/log/raw-output", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            prompt: promptInput,
-            response: mockResponse,
-            latency_ms: latency,
-          }),
-        });
-
-        const resData = await res.json();
-        const newLog: LogItem = {
-          id: resData.data?.id?.toString() || Date.now().toString(),
-          prompt: promptInput,
-          response: mockResponse,
-          latencyMs: latency,
-        };
-
-        setLogs((prev) => [newLog, ...prev]);
-      } catch (error: any) {
-        setCurrentResponse("Backend Bağlantı Hatası: " + error.message);
-      } finally {
-        setIsGenerating(false);
-      }
-    }, 600);
+      setEngine(newEngine);
+      setIsModelLoaded(true);
+      setLoadProgress("Model başarıyla yüklendi! GPU Inference hazır.");
+    } catch (error: any) {
+      setLoadProgress("Model yüklenirken hata oluştu: " + error.message);
+    } finally {
+      setIsModelLoading(false);
+    }
   };
 
-  // Decision Score Verme
+  // --- GERÇEK GEMMA INFERENCE ---
+  const handleGenerate = async () => {
+    if (!promptInput.trim() || isGenerating || !engine) return;
+
+    setIsGenerating(true);
+    setCurrentResponse("Gemma Düşünüyor...");
+    const startTime = performance.now();
+
+    try {
+      const messages = [{ role: "user", content: promptInput }];
+      
+      // Web-LLM üzerinden gerçek inference işlemi
+      const reply = await engine.chat.completions.create({ messages });
+      const rawText = reply.choices[0].message.content;
+      
+      const endTime = performance.now();
+      const latency = Math.round(endTime - startTime);
+
+      setCurrentResponse(rawText);
+
+      // Backend'e Log Kaydı
+      const res = await fetch("http://localhost:8080/llm/log/raw-output", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: promptInput,
+          response: rawText,
+          latency_ms: latency,
+        }),
+      });
+
+      const resData = await res.json();
+      const newLog: LogItem = {
+        id: resData.data?.id?.toString() || Date.now().toString(),
+        prompt: promptInput,
+        response: rawText,
+        latencyMs: latency,
+      };
+
+      setLogs((prev) => [newLog, ...prev]);
+    } catch (error: any) {
+      setCurrentResponse("Inference Hatası: " + error.message);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const handleScore = async (id: string, score: number) => {
     setLogs((prev) =>
       prev.map((log) => (log.id === id ? { ...log, score } : log))
     );
-
     try {
       await fetch("http://localhost:8080/llm/score/decision", {
         method: "POST",
@@ -186,7 +218,31 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Sol Kolon: Prompt Studio */}
         <div className="space-y-4 bg-neutral-900/40 p-6 rounded-2xl border border-neutral-800">
-          <h2 className="text-lg font-semibold text-neutral-200">Prompt Studio</h2>
+          <h2 className="text-lg font-semibold text-neutral-200">Gemma Edge Studio</h2>
+
+          {/* Model Yükleme Kartı */}
+          <div className="bg-neutral-950 border border-neutral-800 p-4 rounded-xl space-y-3">
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-neutral-400 font-medium">Model Durumu:</span>
+              <span className={`text-xs px-2 py-1 rounded font-mono ${isModelLoaded ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'}`}>
+                {isModelLoaded ? 'GPU Hazır' : 'Yüklenmedi'}
+              </span>
+            </div>
+            {!isModelLoaded && (
+              <button
+                onClick={initModel}
+                disabled={isModelLoading}
+                className="w-full bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs py-2 rounded-lg transition-colors border border-neutral-700 disabled:opacity-50"
+              >
+                {isModelLoading ? "İndiriliyor / Yükleniyor..." : "Gemma 2B Modelini Yükle (~1.5GB)"}
+              </button>
+            )}
+            {loadProgress && (
+              <p className="text-[10px] text-neutral-500 font-mono break-words leading-relaxed">
+                {loadProgress}
+              </p>
+            )}
+          </div>
 
           <div className="space-y-2">
             <label className="text-xs text-neutral-400 uppercase tracking-wider">Test Prompt</label>
@@ -195,16 +251,17 @@ export default function DashboardPage() {
               onChange={(e) => setPromptInput(e.target.value)}
               placeholder="Model çıktısını test etmek için bir metin girin..."
               rows={4}
-              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-sm text-neutral-200 focus:outline-none focus:border-blue-500 transition-colors resize-none"
+              disabled={!isModelLoaded}
+              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-sm text-neutral-200 focus:outline-none focus:border-blue-500 transition-colors resize-none disabled:opacity-50"
             />
           </div>
 
           <button
             onClick={handleGenerate}
-            disabled={isGenerating || !promptInput.trim()}
+            disabled={isGenerating || !promptInput.trim() || !isModelLoaded}
             className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 disabled:text-neutral-600 text-white font-medium py-2.5 rounded-xl transition-all shadow-lg shadow-blue-600/20 text-sm"
           >
-            {isGenerating ? "İşleniyor (Inference)..." : "Çıktı Üret & Backend'e Logla"}
+            {isGenerating ? "Inference İşleniyor..." : "Çıktı Üret & Backend'e Logla"}
           </button>
 
           {currentResponse && (
@@ -218,7 +275,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Sağ Kolon: Logs & Scoring */}
-        <div className="space-y-4 bg-neutral-900/40 p-6 rounded-2xl border border-neutral-800 flex flex-col h-[550px]">
+        <div className="space-y-4 bg-neutral-900/40 p-6 rounded-2xl border border-neutral-800 flex flex-col h-[650px]">
           <h2 className="text-lg font-semibold text-neutral-200">Database Monitoring Logs</h2>
 
           <div className="flex-1 overflow-y-auto space-y-4 pr-1">
