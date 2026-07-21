@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { CreateMLCEngine } from '@mlc-ai/web-llm';
+import { getAuthHeaders } from '@/lib/auth';
 
 export default function DashboardPage() {
   const [engine, setEngine] = useState<any>(null);
@@ -12,16 +13,6 @@ export default function DashboardPage() {
   const [isGenerating, setIsGenerating] = useState(false);
   
   const [logs, setLogs] = useState<any[]>([]);
-
-  // Güvenli API İstekleri İçin Header Oluşturucu
-  const getAuthHeaders = () => {
-    // Projende token nasıl tutuluyorsa (genelde localStorage'da 'token' olur)
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : '';
-    return {
-      'Content-Type': 'application/json',
-      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-    };
-  };
 
   const loadModel = async () => {
     setIsModelLoading(true);
@@ -68,7 +59,7 @@ export default function DashboardPage() {
 
       // === BACKEND LOGLAMA (Token ile) ===
       const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-      const res = await fetch(`${apiURL}/llm/log`, {
+      const res = await fetch(`${apiURL}/llm/log/raw-output`, {
         method: 'POST',
         headers: getAuthHeaders(), // Authorization eklendi
         credentials: 'omit', // CORS çakışmasını engeller
@@ -108,8 +99,8 @@ export default function DashboardPage() {
   const updateScore = async (id: number, score: number) => {
     try {
       const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-      const res = await fetch(`${apiURL}/llm/score`, {
-        method: 'PUT',
+      const res = await fetch(`${apiURL}/llm/score/decision`, {
+        method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({ id, score })
       });
@@ -178,7 +169,7 @@ export default function DashboardPage() {
             <div key={log.id} className="bg-gray-900 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
               <div className="flex justify-between items-center mb-3">
                 <span className="text-xs font-mono text-gray-500">Kayıt: #{log.id} | Hız: {log.latency_ms}ms</span>
-                <span className="text-xs font-medium bg-gray-800 px-2 py-1 rounded text-indigo-400">Puan: {log.decision_score}/5</span>
+                <span className="text-xs font-medium bg-gray-800 px-2 py-1 rounded text-indigo-400">Puan: {log.score > 0 ? log.score : '-'}/5</span>
               </div>
               
               <div className="mb-2">
@@ -194,7 +185,7 @@ export default function DashboardPage() {
               <div className="flex items-center gap-2 mt-4 pt-3 border-t border-gray-800">
                 <span className="text-xs text-gray-400 mr-2">Repliği Puanla:</span>
                 {[1, 2, 3, 4, 5].map((star) => (
-                  <button key={star} onClick={() => updateScore(log.id, star)} className={`w-8 h-8 rounded-full flex items-center justify-center text-sm transition-all ${log.decision_score >= star ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`}>
+                  <button key={star} onClick={() => updateScore(log.id, star)} className={`w-8 h-8 rounded-full flex items-center justify-center text-sm transition-all ${log.score >= star ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`}>
                     ★
                   </button>
                 ))}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { getApiUrl, getAuthHeaders } from "@/lib/auth";
 
 interface AnalyticsData {
   summary: {
@@ -24,7 +25,9 @@ export default function AnalyticsPage() {
 
   const fetchAnalytics = async () => {
     try {
-      const res = await fetch("http://localhost:8080/llm/analytics");
+      const res = await fetch(`${getApiUrl()}/llm/analytics`, {
+        headers: getAuthHeaders(),
+      });
       if (res.ok) {
         const json = await res.json();
         setData(json);
@@ -147,7 +150,7 @@ export default function AnalyticsPage() {
             onClick={fetchAnalytics}
             className="text-xs bg-neutral-800 hover:bg-neutral-700 text-neutral-300 px-3 py-1.5 rounded-lg transition-colors"
           >
-            Yenile
+            Tabloyu Yenile
           </button>
         </div>
 

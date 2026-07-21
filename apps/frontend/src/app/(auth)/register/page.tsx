@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { getApiUrl, setToken } from "@/lib/auth";
 
 export default function RegisterPage() {
   const [fullName, setFullName] = useState("");
@@ -15,7 +16,7 @@ export default function RegisterPage() {
     e.preventDefault();
     setError("");
     try {
-      const res = await fetch("http://localhost:8080/auth/register", {
+      const res = await fetch(`${getApiUrl()}/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password, full_name: fullName }),
@@ -23,7 +24,7 @@ export default function RegisterPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Kayıt başarısız");
 
-      localStorage.setItem("stage_token", data.token);
+      setToken(data.token);
       router.push("/");
     } catch (err: any) {
       setError(err.message);
