@@ -156,6 +156,45 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"data": logs})
 	})
 
+	// --- LLM ANALYTICS ENDPOINT ---
+	r.GET("/llm/analytics", func(c *gin.Context) {
+		type AnalyticsResult struct {
+			TotalPrompts   int64   `json:"total_prompts"`
+			AvgLatencyMs   float64 `json:"avg_latency_ms"`
+			AvgScore       float64 `json:"avg_score"`
+			ScoredPrompts  int64   `json:"scored_prompts"`
+		}
+
+		var totalPrompts int64
+		var scoredPrompts int64
+		var avgLatency float64
+		var avgScore float64
+
+		// Toplam prompt sayısı
+		config.DB.Model(&models.LlmLog{}).Count(&totalPrompts)
+
+		// Ortalama Latency
+		config.DB.Model(&models.LlmLog{}).Select("COALESCE(AVG(latency_ms), 0)").Scan(&avgLatency)
+
+		// Puanlanmış prompt sayısı ve ortalama skor
+		config.DB.Model(&models.LlmLog{}).Where("score > 0").Count(&scoredPrompts)
+		config.DB.Model(&models.LlmLog{}).Where("score > 0").Select("COALESCE(AVG(score), 0)").Scan(&avgScore)
+
+		// En yüksek puanlı / en yeni loglar (Leaderboard)
+		var topLogs []models.LlmLog
+		config.DB.Order("score desc, id desc").Limit(5).Find(&topLogs)
+
+		c.JSON(http.StatusOK, gin.H{
+			"summary": AnalyticsResult{
+				TotalPrompts:  totalPrompts,
+				AvgLatencyMs:  avgLatency,
+				AvgScore:      avgScore,
+				ScoredPrompts: scoredPrompts,
+			},
+			"top_logs": topLogs,
+		})
+	})
+
 	r.POST("/llm/score/decision", func(c *gin.Context) {
 		type ScoreInput struct {
 			ID    uint `json:"id" binding:"required"`
