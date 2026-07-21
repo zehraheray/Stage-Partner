@@ -2,39 +2,144 @@ package main
 
 import (
 	"net/http"
+	"strings"
+
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
+
 	"stagepartner/backend/config"
 	"stagepartner/backend/models"
 )
 
+// JWT Auth Middleware
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header gereklidir"})
+			c.Abort()
+			return
+		}
+
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Geçersiz token formatı (Bearer <token>)"})
+			c.Abort()
+			return
+		}
+
+		claims, err := config.ValidateToken(parts[1])
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			c.Abort()
+			return
+		}
+
+		c.Set("userID", claims.UserID)
+		c.Set("userEmail", claims.Email)
+		c.Next()
+	}
+}
+
 func main() {
-	// 1. Veritabanına Bağlan
 	config.ConnectDatabase()
 
-	// 2. Tabloları Otomatik Oluştur (Migration)
-	config.DB.AutoMigrate(&models.LlmLog{})
+	// Tabloları Otomatik Migrate Et
+	config.DB.AutoMigrate(&models.LlmLog{}, &models.User{})
 
 	r := gin.Default()
 
 	// CORS Middleware
 	r.Use(func(c *gin.Context) {
-	    c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-	    c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-	    c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
-	    if c.Request.Method == "OPTIONS" {
-	        c.AbortWithStatus(200)
-	        return
-	    }
-	    c.Next()
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(200)
+			return
+		}
+		c.Next()
 	})
-	
-	// Healthcheck Endpoint
+
+	// Healthcheck
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "Render MCP Healthcheck: Live Live Live!"})
 	})
 
-	// Logları Kaydetme (POST /llm/log/raw-output)
+	// --- AUTH ENDPOINTS ---
+	auth := r.Group("/auth")
+	{
+		auth.POST("/register", func(c *gin.Context) {
+			var input models.RegisterInput
+			if err := c.ShouldBindJSON(&input); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+
+			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Şifre şifrelenemedi"})
+				return
+			}
+
+			user := models.User{
+				Email:    input.Email,
+				Password: string(hashedPassword),
+				FullName: input.FullName,
+			}
+
+			if err := config.DB.Create(&user).Error; err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Bu e-posta adresi zaten kullanımda"})
+				return
+			}
+
+			token, _ := config.GenerateToken(user.ID, user.Email)
+
+			c.JSON(http.StatusOK, gin.H{
+				"message": "Kayıt başarılı",
+				"token":   token,
+				"user":    user,
+			})
+		})
+
+		auth.POST("/login", func(c *gin.Context) {
+			var input models.LoginInput
+			if err := c.ShouldBindJSON(&input); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+
+			var user models.User
+			if err := config.DB.Where("email = ?", input.Email).First(&user).Error; err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Geçersiz e-posta veya şifre"})
+				return
+			}
+
+			if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Geçersiz e-posta veya şifre"})
+				return
+			}
+
+			token, _ := config.GenerateToken(user.ID, user.Email)
+
+			c.JSON(http.StatusOK, gin.H{
+				"message": "Giriş başarılı",
+				"token":   token,
+				"user":    user,
+			})
+		})
+	}
+
+	// --- KORUMALI KULLANICI PROFİL ENDPOINT'İ ---
+	r.GET("/user/profile", AuthMiddleware(), func(c *gin.Context) {
+		userID, _ := c.Get("userID")
+		var user models.User
+		config.DB.First(&user, userID)
+		c.JSON(http.StatusOK, gin.H{"user": user})
+	})
+
+	// --- LLM ENDPOINTS ---
 	r.POST("/llm/log/raw-output", func(c *gin.Context) {
 		var input models.LlmLog
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -45,14 +150,12 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"data": input})
 	})
 
-	// Logları Listeleme (GET /llm/logs)
 	r.GET("/llm/logs", func(c *gin.Context) {
 		var logs []models.LlmLog
 		config.DB.Order("id desc").Find(&logs)
 		c.JSON(http.StatusOK, gin.H{"data": logs})
 	})
 
-	// Decision Score Güncelleme (POST /llm/score/decision)
 	r.POST("/llm/score/decision", func(c *gin.Context) {
 		type ScoreInput struct {
 			ID    uint `json:"id" binding:"required"`
@@ -63,15 +166,15 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		
+
 		var logRecord models.LlmLog
 		if err := config.DB.First(&logRecord, input.ID).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Kayit bulunamadi"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Kayıt bulunamadı"})
 			return
 		}
 
 		config.DB.Model(&logRecord).Update("score", input.Score)
-		c.JSON(http.StatusOK, gin.H{"message": "Skor basariyla güncellendi", "data": logRecord})
+		c.JSON(http.StatusOK, gin.H{"message": "Skor güncellendi", "data": logRecord})
 	})
 
 	r.Run(":8080")
