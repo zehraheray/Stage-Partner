@@ -2,20 +2,20 @@
 import { useState, useEffect } from 'react';
 import { CreateMLCEngine } from '@mlc-ai/web-llm';
 
+type Message = { role: string; content: string; isPending?: boolean; latency?: number; promptContext?: string };
+
 export default function DashboardPage() {
   const [engine, setEngine] = useState<any>(null);
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState('');
   
   const [prompt, setPrompt] = useState('');
-  const [chatHistory, setChatHistory] = useState<{role: string, content: string}[]>([]);
+  const [chatHistory, setChatHistory] = useState<Message[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   
   const [logs, setLogs] = useState<any[]>([]);
 
-  // Güvenli API İstekleri İçin Header Oluşturucu
   const getAuthHeaders = () => {
-    // Projende token nasıl tutuluyorsa (genelde localStorage'da 'token' olur)
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : '';
     return {
       'Content-Type': 'application/json',
@@ -39,47 +39,37 @@ export default function DashboardPage() {
     }
   };
 
-  const handleGenerate = async () => {
+  // Dinamik olarak prompt alabilen generate fonksiyonu
+  const handleGenerate = async (overridePrompt?: string) => {
     if (!engine) return alert('Önce Sahne Asistanı modelini yüklemelisin.');
-    if (!prompt.trim()) return;
+    
+    const activePrompt = overridePrompt || prompt;
+    if (!activePrompt.trim()) return;
 
     setIsGenerating(true);
     const startTime = performance.now();
 
     try {
-      const updatedHistory = [...chatHistory, { role: 'user', content: prompt }];
+      const updatedHistory = [...chatHistory, { role: 'user', content: activePrompt }];
       
-      // === SİHİRLİ DOKUNUŞ: SİSTEM PROMPTU ===
-      // Modele kim olduğunu ve ne yapması gerektiğini gizlice söylüyoruz
       const systemMessage = { 
         role: 'system', 
-        content: 'Sen usta bir tiyatro senaristi ve sahne asistanısın. Kullanıcı sana sahne durumunu veya bir repliği verecek. SAKIN durumu açıklama veya analiz etme. Doğrudan karakterlerin ağzından, yaratıcı, duygusal ve akıcı devam replikleri (diyaloglar) yaz. Sadece üretilen diyalog metnini ver.' 
+        content: 'Sen usta bir tiyatro senaristi ve sahne asistanısın. Kullanıcı sana sahne durumunu veya bir repliği verecek. Durumu asla açıklama. Doğrudan karakterlerin ağzından, yaratıcı ve akıcı diyaloglar/replikler yaz. Sadece üretilen diyalog metnini ver.' 
       };
 
       const reply = await engine.chat.completions.create({
-        messages: [systemMessage, ...updatedHistory], // Sistem promptu en başa eklenir
+        messages: [systemMessage, ...updatedHistory.map(h => ({ role: h.role, content: h.content }))],
       });
       
       const responseText = reply.choices[0].message.content;
       const endTime = performance.now();
       const latencyMs = Math.round(endTime - startTime);
       
-      setChatHistory([...updatedHistory, { role: 'assistant', content: responseText }]);
-
-      // === BACKEND LOGLAMA (Token ile) ===
-      const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-      const res = await fetch(`${apiURL}/llm/log`, {
-        method: 'POST',
-        headers: getAuthHeaders(), // Authorization eklendi
-        credentials: 'omit', // CORS çakışmasını engeller
-        body: JSON.stringify({ prompt, response: responseText, latency_ms: latencyMs })
-      });
-
-      if (!res.ok) {
-        console.error("Backend log kaydını reddetti. Yetki hatası olabilir.");
-      } else {
-        fetchLogs(); // Başarılıysa tabloyu yenile
-      }
+      // DB'ye göndermiyoruz, SADECE sola ekleyip ONAY bekliyoruz.
+      setChatHistory([
+        ...updatedHistory, 
+        { role: 'assistant', content: responseText, isPending: true, latency: latencyMs, promptContext: activePrompt }
+      ]);
       
       setPrompt('');
     } catch (error) {
@@ -90,11 +80,63 @@ export default function DashboardPage() {
     }
   };
 
+  // Bekleyen Mesaja Puan Verildiğinde Çalışan Fonksiyon
+  const handlePendingScore = async (msgIndex: number, score: number) => {
+    const pendingMsg = chatHistory[msgIndex];
+    if (!pendingMsg || !pendingMsg.isPending) return;
+
+    // Arayüzde bekleyen durumunu kaldır
+    const newHistory = [...chatHistory];
+    newHistory[msgIndex].isPending = false;
+
+    if (score >= 3) {
+      // 3 ve Üzeri: ONAYLANDI -> DB'ye Kaydet ve Loglara Düşür
+      setChatHistory(newHistory);
+      try {
+        const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+        // 1. Logu oluştur
+        const res = await fetch(`${apiURL}/llm/log`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          credentials: 'omit',
+          body: JSON.stringify({ prompt: pendingMsg.promptContext, response: pendingMsg.content, latency_ms: pendingMsg.latency })
+        });
+        
+        if (res.ok) {
+           // Bizim backend ID dönmediği için en son logları çekip en üsttekini puanlıyoruz
+           const logsRes = await fetch(`${apiURL}/llm/logs`, { headers: getAuthHeaders(), cache: 'no-store' });
+           const logsData = await logsRes.json();
+           if(logsData?.data?.length > 0) {
+              const latestLogId = logsData.data[logsData.data.length - 1].id;
+              // 2. Puanı ver
+              await fetch(`${apiURL}/llm/score`, {
+                method: 'PUT',
+                headers: getAuthHeaders(),
+                body: JSON.stringify({ id: latestLogId, score })
+              });
+           }
+           fetchLogs();
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    } else {
+      // 2 ve Altı: REDDEDİLDİ -> Yeniden Üretim İste
+      const rejectNote = `[Yönetmen Notu: Bu replik reddedildi (${score} Yıldız). Aynı bağlamda daha güçlü, duygusal ve tamamen farklı bir alternatif replik yaz.]`;
+      newHistory.push({ role: 'user', content: rejectNote });
+      setChatHistory(newHistory);
+      
+      // Otomatik olarak asistanı tekrar tetikle
+      handleGenerate(rejectNote);
+    }
+  };
+
   const fetchLogs = async () => {
     try {
       const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
       const res = await fetch(`${apiURL}/llm/logs`, {
-        headers: getAuthHeaders()
+        headers: getAuthHeaders(),
+        cache: 'no-store' // Cache'i iptal et ki canlı veri gelsin
       });
       const data = await res.json();
       if (data.data) {
@@ -102,20 +144,6 @@ export default function DashboardPage() {
       }
     } catch (error) {
       console.error("Loglar çekilemedi", error);
-    }
-  };
-
-  const updateScore = async (id: number, score: number) => {
-    try {
-      const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-      const res = await fetch(`${apiURL}/llm/score`, {
-        method: 'PUT',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ id, score })
-      });
-      if (res.ok) fetchLogs();
-    } catch (error) {
-      console.error(error);
     }
   };
 
@@ -127,7 +155,7 @@ export default function DashboardPage() {
       {/* SOL PANEL: Yönetmen / Senarist Diyalog Girişi */}
       <div className="w-1/2 bg-gray-800 rounded-xl p-6 flex flex-col relative border border-gray-700 shadow-xl">
         <h2 className="text-xl font-bold text-white mb-2">🎭 Sahne & Diyalog Yöneticisi</h2>
-        <p className="text-gray-400 text-sm mb-6">Yönetmen olarak sahne durumunu girin. Asistan diyalogu doğrudan sürdürecektir.</p>
+        <p className="text-gray-400 text-sm mb-6">Yönetmen olarak sahne durumunu girin. Modelin ürettiği repliği puanlayarak onaylayın veya yeniden yazdırın.</p>
         
         <div className="mb-6 p-4 bg-gray-900 rounded-lg border border-gray-700">
           <div className="flex items-center justify-between">
@@ -148,9 +176,29 @@ export default function DashboardPage() {
           {chatHistory.map((msg, idx) => (
              <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                 <span className="text-xs text-gray-500 mb-1">{msg.role === 'user' ? 'Yönetmen' : 'Sahne Asistanı'}</span>
+                
                 <div className={`p-3 rounded-lg max-w-[85%] text-sm whitespace-pre-wrap ${msg.role === 'user' ? 'bg-indigo-600/30 text-indigo-100 border border-indigo-500/30 rounded-tr-none' : 'bg-gray-700 text-gray-200 border border-gray-600 rounded-tl-none'}`}>
                   {msg.content}
                 </div>
+
+                {/* Eğer Mesaj Onay Bekliyorsa Yıldızlar Çıksın */}
+                {msg.isPending && (
+                  <div className="mt-2 flex flex-col items-start bg-gray-900/50 p-2 rounded border border-yellow-500/30">
+                     <span className="text-xs text-yellow-500 mb-1">Sahneye Eklemek İçin Puanla:</span>
+                     <div className="flex gap-1">
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <button 
+                            key={star} 
+                            onClick={() => handlePendingScore(idx, star)}
+                            className="w-7 h-7 rounded-full bg-gray-800 border border-gray-600 text-gray-400 hover:bg-yellow-500/20 hover:text-yellow-500 hover:border-yellow-500 transition-all text-xs"
+                          >
+                            ★
+                          </button>
+                        ))}
+                     </div>
+                     <span className="text-[10px] text-gray-500 mt-1">3+ Onaylar | 1-2 Yeniden Yazdırır</span>
+                  </div>
+                )}
              </div>
           ))}
         </div>
@@ -162,46 +210,37 @@ export default function DashboardPage() {
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
           />
-          <button onClick={handleGenerate} disabled={!engine || !prompt.trim() || isGenerating} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2">
-            {isGenerating ? 'Replik Düşünülüyor...' : 'Replik Üret & Sahneye Logla'}
+          <button onClick={() => handleGenerate()} disabled={!engine || !prompt.trim() || isGenerating} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2">
+            {isGenerating ? 'Replik Düşünülüyor...' : 'Replik Üret'}
           </button>
         </div>
       </div>
 
-      {/* SAĞ PANEL: Loglar & Puanlama */}
+      {/* SAĞ PANEL: Loglar */}
       <div className="w-1/2 bg-gray-800 rounded-xl p-6 border border-gray-700 flex flex-col shadow-xl">
-        <h2 className="text-xl font-bold text-white mb-2">📋 Sahne Logları & Karar Puanlaması</h2>
-        <p className="text-gray-400 text-sm mb-6">Kulisteki oyuncular ve ekip üretilen replikleri buradan takip eder ve puanlar.</p>
+        <h2 className="text-xl font-bold text-white mb-2">📋 Onaylanmış Sahne Logları</h2>
+        <p className="text-gray-400 text-sm mb-6">Yönetmen tarafından 3 ve üzeri puan alan replikler senaryoya işlenir ve kulistekiler tarafından görülür.</p>
         
         <div className="flex-1 overflow-y-auto space-y-4 pr-2">
           {logs.map((log) => (
-            <div key={log.id} className="bg-gray-900 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
+            <div key={log.id} className="bg-gray-900 rounded-lg p-4 border border-gray-700">
               <div className="flex justify-between items-center mb-3">
                 <span className="text-xs font-mono text-gray-500">Kayıt: #{log.id} | Hız: {log.latency_ms}ms</span>
-                <span className="text-xs font-medium bg-gray-800 px-2 py-1 rounded text-indigo-400">Puan: {log.decision_score}/5</span>
+                <span className="text-xs font-medium bg-yellow-500/20 px-2 py-1 rounded text-yellow-500 border border-yellow-500/30">
+                  Kabul Edildi: {log.decision_score}/5
+                </span>
               </div>
-              
               <div className="mb-2">
                  <p className="text-xs text-gray-500 mb-1">Yönetmen / Bağlam:</p>
                  <p className="text-sm text-gray-300 italic">"{log.prompt}"</p>
               </div>
-              
-              <div className="mb-4">
-                 <p className="text-xs text-gray-500 mb-1">Üretilen Replik:</p>
+              <div>
+                 <p className="text-xs text-gray-500 mb-1">Sahne Repliği:</p>
                  <p className="text-sm text-white bg-gray-800/50 p-2 rounded border border-gray-700/50 whitespace-pre-wrap">{log.response}</p>
-              </div>
-
-              <div className="flex items-center gap-2 mt-4 pt-3 border-t border-gray-800">
-                <span className="text-xs text-gray-400 mr-2">Repliği Puanla:</span>
-                {[1, 2, 3, 4, 5].map((star) => (
-                  <button key={star} onClick={() => updateScore(log.id, star)} className={`w-8 h-8 rounded-full flex items-center justify-center text-sm transition-all ${log.decision_score >= star ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`}>
-                    ★
-                  </button>
-                ))}
               </div>
             </div>
           ))}
-          {logs.length === 0 && <div className="text-gray-500 text-center mt-10">Henüz sahne kaydı bulunmuyor. Yeni bir replik üretin.</div>}
+          {logs.length === 0 && <div className="text-gray-500 text-center mt-10">Henüz onaylanmış sahne kaydı bulunmuyor.</div>}
         </div>
       </div>
     </div>
