@@ -1,323 +1,207 @@
-"use client";
-
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { CreateMLCEngine } from "@mlc-ai/web-llm";
-
-interface LogItem {
-  id: string;
-  prompt: string;
-  response: string;
-  latencyMs: number;
-  score?: number;
-}
-
-interface User {
-  id: number;
-  email: string;
-  full_name: string;
-}
+'use client';
+import { useState, useEffect } from 'react';
+import { CreateMLCEngine } from '@mlc-ai/web-llm';
 
 export default function DashboardPage() {
-  const router = useRouter();
-  const [promptInput, setPromptInput] = useState("");
-  const [currentResponse, setCurrentResponse] = useState("");
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [logs, setLogs] = useState<LogItem[]>([]);
-
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  // Web-LLM State'leri
   const [engine, setEngine] = useState<any>(null);
-  const [isModelLoaded, setIsModelLoaded] = useState(false);
-  const [loadProgress, setLoadProgress] = useState("");
   const [isModelLoading, setIsModelLoading] = useState(false);
+  const [loadingProgress, setLoadingProgress] = useState('');
+  
+  const [prompt, setPrompt] = useState('');
+  const [chatHistory, setChatHistory] = useState<{role: string, content: string}[]>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  
+  const [logs, setLogs] = useState<any[]>([]);
 
-  // JWT Token Kontrolü (Auth Guard)
-  useEffect(() => {
-    const token = localStorage.getItem("stage_token");
-    if (!token) {
-      router.push("/login");
-      return;
-    }
-
-    fetch("http://localhost:8080/user/profile", {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error("Geçersiz oturum");
-        return res.json();
-      })
-      .then((data) => {
-        setUser(data.user);
-        setLoading(false);
-        fetchLogs();
-      })
-      .catch(() => {
-        localStorage.removeItem("stage_token");
-        router.push("/login");
-      });
-  }, [router]);
-
-  // Logları Çekme
-  const fetchLogs = async () => {
-    try {
-      const res = await fetch("http://localhost:8080/llm/logs");
-      if (res.ok) {
-        const data = await res.json();
-        if (data.data) {
-          const mappedLogs: LogItem[] = data.data.map((item: any) => ({
-            id: item.id.toString(),
-            prompt: item.prompt,
-            response: item.response,
-            latencyMs: item.latency_ms,
-            score: item.score > 0 ? item.score : undefined,
-          }));
-          setLogs(mappedLogs);
-        }
-      }
-    } catch (err) {
-      console.log("Loglar çekilemedi.");
-    }
+  // Güvenli API İstekleri İçin Header Oluşturucu
+  const getAuthHeaders = () => {
+    // Projende token nasıl tutuluyorsa (genelde localStorage'da 'token' olur)
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : '';
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    };
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem("stage_token");
-    router.push("/login");
-  };
-
-  // --- WEB-LLM GEMMA MODEL YÜKLEME ---
-  const initModel = async () => {
-    if (!("gpu" in navigator)) {
-      alert("Tarayıcınız WebGPU desteklemiyor! Lütfen güncel bir Chrome veya Edge kullanın.");
-      return;
-    }
-
+  const loadModel = async () => {
     setIsModelLoading(true);
     try {
-      // Gemma 2B modelini kullanıyoruz (WebLLM uyumlu Q4 versiyonu)
-      const selectedModel = "gemma-2b-it-q4f16_1-MLC";
-      
-      const newEngine = await CreateMLCEngine(selectedModel, {
-        initProgressCallback: (progress) => {
-          setLoadProgress(progress.text);
-        },
+      const selectedModel = 'gemma-2b-it-q4f16_1-MLC';
+      const loadedEngine = await CreateMLCEngine(selectedModel, {
+        initProgressCallback: (progress) => setLoadingProgress(progress.text),
       });
-
-      setEngine(newEngine);
-      setIsModelLoaded(true);
-      setLoadProgress("Model başarıyla yüklendi! GPU Inference hazır.");
-    } catch (error: any) {
-      setLoadProgress("Model yüklenirken hata oluştu: " + error.message);
+      setEngine(loadedEngine);
+    } catch (error) {
+      console.error(error);
+      alert('Model yüklenemedi. Tarayıcınız WebGPU desteklemiyor olabilir.');
     } finally {
       setIsModelLoading(false);
     }
   };
 
-  // --- GERÇEK GEMMA INFERENCE ---
   const handleGenerate = async () => {
-    if (!promptInput.trim() || isGenerating || !engine) return;
+    if (!engine) return alert('Önce Sahne Asistanı modelini yüklemelisin.');
+    if (!prompt.trim()) return;
 
     setIsGenerating(true);
-    setCurrentResponse("Gemma Düşünüyor...");
     const startTime = performance.now();
 
     try {
-      const messages = [{ role: "user", content: promptInput }];
+      const updatedHistory = [...chatHistory, { role: 'user', content: prompt }];
       
-      // Web-LLM üzerinden gerçek inference işlemi
-      const reply = await engine.chat.completions.create({ messages });
-      const rawText = reply.choices[0].message.content;
-      
-      const endTime = performance.now();
-      const latency = Math.round(endTime - startTime);
-
-      setCurrentResponse(rawText);
-
-      // Backend'e Log Kaydı
-      const res = await fetch("http://localhost:8080/llm/log/raw-output", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: promptInput,
-          response: rawText,
-          latency_ms: latency,
-        }),
-      });
-
-      const resData = await res.json();
-      const newLog: LogItem = {
-        id: resData.data?.id?.toString() || Date.now().toString(),
-        prompt: promptInput,
-        response: rawText,
-        latencyMs: latency,
+      // === SİHİRLİ DOKUNUŞ: SİSTEM PROMPTU ===
+      // Modele kim olduğunu ve ne yapması gerektiğini gizlice söylüyoruz
+      const systemMessage = { 
+        role: 'system', 
+        content: 'Sen usta bir tiyatro senaristi ve sahne asistanısın. Kullanıcı sana sahne durumunu veya bir repliği verecek. SAKIN durumu açıklama veya analiz etme. Doğrudan karakterlerin ağzından, yaratıcı, duygusal ve akıcı devam replikleri (diyaloglar) yaz. Sadece üretilen diyalog metnini ver.' 
       };
 
-      setLogs((prev) => [newLog, ...prev]);
-    } catch (error: any) {
-      setCurrentResponse("Inference Hatası: " + error.message);
+      const reply = await engine.chat.completions.create({
+        messages: [systemMessage, ...updatedHistory], // Sistem promptu en başa eklenir
+      });
+      
+      const responseText = reply.choices[0].message.content;
+      const endTime = performance.now();
+      const latencyMs = Math.round(endTime - startTime);
+      
+      setChatHistory([...updatedHistory, { role: 'assistant', content: responseText }]);
+
+      // === BACKEND LOGLAMA (Token ile) ===
+      const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+      const res = await fetch(`${apiURL}/llm/log`, {
+        method: 'POST',
+        headers: getAuthHeaders(), // Authorization eklendi
+        credentials: 'omit', // CORS çakışmasını engeller
+        body: JSON.stringify({ prompt, response: responseText, latency_ms: latencyMs })
+      });
+
+      if (!res.ok) {
+        console.error("Backend log kaydını reddetti. Yetki hatası olabilir.");
+      } else {
+        fetchLogs(); // Başarılıysa tabloyu yenile
+      }
+      
+      setPrompt('');
+    } catch (error) {
+      console.error(error);
+      alert('Çıktı üretilirken hata oluştu.');
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const handleScore = async (id: string, score: number) => {
-    setLogs((prev) =>
-      prev.map((log) => (log.id === id ? { ...log, score } : log))
-    );
+  const fetchLogs = async () => {
     try {
-      await fetch("http://localhost:8080/llm/score/decision", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: Number(id), score }),
+      const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+      const res = await fetch(`${apiURL}/llm/logs`, {
+        headers: getAuthHeaders()
       });
-    } catch (err) {
-      console.error("Skor gönderilemedi:", err);
+      const data = await res.json();
+      if (data.data) {
+        setLogs(data.data.reverse());
+      }
+    } catch (error) {
+      console.error("Loglar çekilemedi", error);
     }
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-[60vh] flex items-center justify-center text-neutral-400 text-sm">
-        Oturum doğrulanıyor...
-      </div>
-    );
-  }
+  const updateScore = async (id: number, score: number) => {
+    try {
+      const apiURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+      const res = await fetch(`${apiURL}/llm/score`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ id, score })
+      });
+      if (res.ok) fetchLogs();
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  useEffect(() => { fetchLogs(); }, []);
 
   return (
-    <div className="space-y-8 max-w-6xl mx-auto">
-      {/* Top Bar */}
-      <div className="flex justify-between items-center border-b border-neutral-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white">
-            Raw LLM <span className="text-blue-500">Monitoring & Scoring</span>
-          </h1>
-          <p className="text-xs text-neutral-400 mt-1">
-            Stage Partner AI — Edge LLM Analytics
-          </p>
+    <div className="flex gap-6 h-[calc(100vh-100px)]">
+      
+      {/* SOL PANEL: Yönetmen / Senarist Diyalog Girişi */}
+      <div className="w-1/2 bg-gray-800 rounded-xl p-6 flex flex-col relative border border-gray-700 shadow-xl">
+        <h2 className="text-xl font-bold text-white mb-2">🎭 Sahne & Diyalog Yöneticisi</h2>
+        <p className="text-gray-400 text-sm mb-6">Yönetmen olarak sahne durumunu girin. Asistan diyalogu doğrudan sürdürecektir.</p>
+        
+        <div className="mb-6 p-4 bg-gray-900 rounded-lg border border-gray-700">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium text-gray-300">Edge AI Asistanı:</span>
+            {engine ? (
+              <span className="px-3 py-1 bg-green-500/20 text-green-400 text-xs rounded-full border border-green-500/30">Sahneye Hazır (GPU)</span>
+            ) : (
+              <button onClick={loadModel} disabled={isModelLoading} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-lg">
+                {isModelLoading ? 'Yükleniyor...' : 'Asistanı Yükle (Gemma 2B)'}
+              </button>
+            )}
+          </div>
+          {isModelLoading && <p className="text-xs text-indigo-400 mt-2 truncate">{loadingProgress}</p>}
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className="bg-neutral-900 border border-neutral-800 px-3 py-1.5 rounded-xl text-xs flex items-center gap-3">
-            <div>
-              <p className="text-neutral-200 font-medium">{user?.full_name || user?.email}</p>
-              <p className="text-emerald-400 text-[10px]">● Oturum Açık</p>
-            </div>
-            <button
-              onClick={handleLogout}
-              className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 px-2 py-1 rounded-lg transition-colors text-[11px]"
-            >
-              Çıkış
-            </button>
-          </div>
+        <div className="flex-1 overflow-y-auto mb-4 space-y-4 p-2">
+          {chatHistory.length === 0 && <div className="text-gray-500 text-center text-sm mt-10 italic">Diyalog yok. Başlamak için sahne girin.</div>}
+          {chatHistory.map((msg, idx) => (
+             <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                <span className="text-xs text-gray-500 mb-1">{msg.role === 'user' ? 'Yönetmen' : 'Sahne Asistanı'}</span>
+                <div className={`p-3 rounded-lg max-w-[85%] text-sm whitespace-pre-wrap ${msg.role === 'user' ? 'bg-indigo-600/30 text-indigo-100 border border-indigo-500/30 rounded-tr-none' : 'bg-gray-700 text-gray-200 border border-gray-600 rounded-tl-none'}`}>
+                  {msg.content}
+                </div>
+             </div>
+          ))}
+        </div>
+
+        <div className="mt-auto">
+           <textarea 
+            className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-none h-24 mb-3 text-sm"
+            placeholder="Örn: Karakter A kapıyı sertçe çarpar ve bağırır: 'Bana yalan söyledin!'"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+          />
+          <button onClick={handleGenerate} disabled={!engine || !prompt.trim() || isGenerating} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2">
+            {isGenerating ? 'Replik Düşünülüyor...' : 'Replik Üret & Sahneye Logla'}
+          </button>
         </div>
       </div>
 
-      {/* Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Sol Kolon: Prompt Studio */}
-        <div className="space-y-4 bg-neutral-900/40 p-6 rounded-2xl border border-neutral-800">
-          <h2 className="text-lg font-semibold text-neutral-200">Gemma Edge Studio</h2>
+      {/* SAĞ PANEL: Loglar & Puanlama */}
+      <div className="w-1/2 bg-gray-800 rounded-xl p-6 border border-gray-700 flex flex-col shadow-xl">
+        <h2 className="text-xl font-bold text-white mb-2">📋 Sahne Logları & Karar Puanlaması</h2>
+        <p className="text-gray-400 text-sm mb-6">Kulisteki oyuncular ve ekip üretilen replikleri buradan takip eder ve puanlar.</p>
+        
+        <div className="flex-1 overflow-y-auto space-y-4 pr-2">
+          {logs.map((log) => (
+            <div key={log.id} className="bg-gray-900 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
+              <div className="flex justify-between items-center mb-3">
+                <span className="text-xs font-mono text-gray-500">Kayıt: #{log.id} | Hız: {log.latency_ms}ms</span>
+                <span className="text-xs font-medium bg-gray-800 px-2 py-1 rounded text-indigo-400">Puan: {log.decision_score}/5</span>
+              </div>
+              
+              <div className="mb-2">
+                 <p className="text-xs text-gray-500 mb-1">Yönetmen / Bağlam:</p>
+                 <p className="text-sm text-gray-300 italic">"{log.prompt}"</p>
+              </div>
+              
+              <div className="mb-4">
+                 <p className="text-xs text-gray-500 mb-1">Üretilen Replik:</p>
+                 <p className="text-sm text-white bg-gray-800/50 p-2 rounded border border-gray-700/50 whitespace-pre-wrap">{log.response}</p>
+              </div>
 
-          {/* Model Yükleme Kartı */}
-          <div className="bg-neutral-950 border border-neutral-800 p-4 rounded-xl space-y-3">
-            <div className="flex justify-between items-center">
-              <span className="text-xs text-neutral-400 font-medium">Model Durumu:</span>
-              <span className={`text-xs px-2 py-1 rounded font-mono ${isModelLoaded ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'}`}>
-                {isModelLoaded ? 'GPU Hazır' : 'Yüklenmedi'}
-              </span>
-            </div>
-            {!isModelLoaded && (
-              <button
-                onClick={initModel}
-                disabled={isModelLoading}
-                className="w-full bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs py-2 rounded-lg transition-colors border border-neutral-700 disabled:opacity-50"
-              >
-                {isModelLoading ? "İndiriliyor / Yükleniyor..." : "Gemma 2B Modelini Yükle (~1.5GB)"}
-              </button>
-            )}
-            {loadProgress && (
-              <p className="text-[10px] text-neutral-500 font-mono break-words leading-relaxed">
-                {loadProgress}
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-xs text-neutral-400 uppercase tracking-wider">Test Prompt</label>
-            <textarea
-              value={promptInput}
-              onChange={(e) => setPromptInput(e.target.value)}
-              placeholder="Model çıktısını test etmek için bir metin girin..."
-              rows={4}
-              disabled={!isModelLoaded}
-              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-sm text-neutral-200 focus:outline-none focus:border-blue-500 transition-colors resize-none disabled:opacity-50"
-            />
-          </div>
-
-          <button
-            onClick={handleGenerate}
-            disabled={isGenerating || !promptInput.trim() || !isModelLoaded}
-            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 disabled:text-neutral-600 text-white font-medium py-2.5 rounded-xl transition-all shadow-lg shadow-blue-600/20 text-sm"
-          >
-            {isGenerating ? "Inference İşleniyor..." : "Çıktı Üret & Backend'e Logla"}
-          </button>
-
-          {currentResponse && (
-            <div className="mt-4 space-y-2">
-              <span className="text-xs text-blue-400 uppercase tracking-wider font-semibold">Anlık Ham Çıktı</span>
-              <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800 text-sm text-neutral-300 max-h-48 overflow-y-auto leading-relaxed">
-                {currentResponse}
+              <div className="flex items-center gap-2 mt-4 pt-3 border-t border-gray-800">
+                <span className="text-xs text-gray-400 mr-2">Repliği Puanla:</span>
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <button key={star} onClick={() => updateScore(log.id, star)} className={`w-8 h-8 rounded-full flex items-center justify-center text-sm transition-all ${log.decision_score >= star ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`}>
+                    ★
+                  </button>
+                ))}
               </div>
             </div>
-          )}
-        </div>
-
-        {/* Sağ Kolon: Logs & Scoring */}
-        <div className="space-y-4 bg-neutral-900/40 p-6 rounded-2xl border border-neutral-800 flex flex-col h-[650px]">
-          <h2 className="text-lg font-semibold text-neutral-200">Database Monitoring Logs</h2>
-
-          <div className="flex-1 overflow-y-auto space-y-4 pr-1">
-            {logs.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-neutral-600 text-sm">
-                Veritabanında henüz kayıtlı log bulunmuyor.
-              </div>
-            ) : (
-              logs.map((log) => (
-                <div key={log.id} className="bg-neutral-950 p-4 rounded-xl border border-neutral-800 space-y-3">
-                  <div className="flex justify-between items-center text-xs text-neutral-500">
-                    <span className="font-mono">DB ID: #{log.id} | Latency: {log.latencyMs}ms</span>
-                    <span className={log.score ? "text-emerald-400 font-semibold" : "text-amber-500"}>
-                      {log.score ? `Decision Score: ${log.score}/5` : "Puan Bekliyor"}
-                    </span>
-                  </div>
-
-                  <p className="text-xs text-neutral-400 italic">"{log.prompt}"</p>
-                  <p className="text-sm text-neutral-200 line-clamp-3">{log.response}</p>
-
-                  <div className="flex items-center justify-between pt-2 border-t border-neutral-900">
-                    <span className="text-xs text-neutral-500">Kalite Puanı Ver:</span>
-                    <div className="flex gap-1">
-                      {[1, 2, 3, 4, 5].map((star) => (
-                        <button
-                          key={star}
-                          onClick={() => handleScore(log.id, star)}
-                          className={`w-6 h-6 rounded text-xs font-bold transition-colors ${
-                            log.score === star
-                              ? "bg-blue-600 text-white"
-                              : "bg-neutral-900 text-neutral-400 hover:bg-neutral-800"
-                          }`}
-                        >
-                          {star}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
+          ))}
+          {logs.length === 0 && <div className="text-gray-500 text-center mt-10">Henüz sahne kaydı bulunmuyor. Yeni bir replik üretin.</div>}
         </div>
       </div>
     </div>
