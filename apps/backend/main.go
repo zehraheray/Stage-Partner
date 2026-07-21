@@ -16,6 +16,19 @@ func main() {
 
 	r := gin.Default()
 
+	// CORS Middleware
+	r.Use(func(c *gin.Context) {
+	    c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+	    c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	    c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+	    if c.Request.Method == "OPTIONS" {
+	        c.AbortWithStatus(200)
+	        return
+	    }
+	    c.Next()
+	})
+	
 	// Healthcheck Endpoint
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "Render MCP Healthcheck: Live Live Live!"})
