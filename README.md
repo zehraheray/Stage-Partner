@@ -373,11 +373,6 @@ Database tables are automatically created using **GORM AutoMigrate** during the 
 
 ---
 
-# 📄 License
-
-This project was developed as part of the **MasterFabric Agentic AI Developer Training Program**.
-
----
 
 <div align="center">
 
