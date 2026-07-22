@@ -145,7 +145,10 @@ Stage-Partner/
 ├── README.md
 ├── docker-compose.yml
 ├── Makefile
-├── .github/                          # CI/CD workflows
+├── turbo.json
+├── .github/
+│   └── workflows/
+│       └── ci.yml                    # CI/CD pipeline
 │
 ├── apps/
 │   ├── frontend/                     # Next.js SPA (Vercel)
@@ -157,21 +160,24 @@ Stage-Partner/
 │   │   │   │   └── (analytics)/      # Analytics & metrics
 │   │   │   ├── components/
 │   │   │   │   └── AuthGuard.tsx     # Route protection
-│   │   │   └── lib/
-│   │   │       └── auth.ts           # Auth utilities
+│   │   │   ├── lib/
+│   │   │   │   └── auth.ts           # Auth utilities
+│   │   │   └── __tests__/            # Frontend tests
+│   │   ├── vitest.config.ts
 │   │   ├── package.json
 │   │   └── tsconfig.json
 │   │
 │   └── backend/                      # Go API (Render)
-│       ├── cmd/
-│       │   └── server/
-│       │       └── main.go           # Entry point
-│       ├── config/                   # Configuration
-│       ├── Dockerfile                # Multi-stage build
+│       ├── main.go                   # Entry point
+│       ├── config/                   # DB & JWT configuration
+│       ├── models/                   # GORM models
+│       ├── middleware/               # Auth, CORS, rate limiting
+│       ├── handlers/                 # HTTP handlers
+│       ├── routes/                   # Route registration
+│       ├── tests/                    # Integration tests
+│       ├── Dockerfile
 │       ├── go.mod
 │       └── go.sum
-│
-└── deployments/                      # Deployment configs
 ```
 
 ---
@@ -205,7 +211,7 @@ cd apps/backend
 
 go mod download
 
-go run cmd/server/main.go
+go run main.go
 ```
 
 Backend:
@@ -244,31 +250,46 @@ and register to start using Stage Partner.
 
 # 🔌 API Endpoints
 
+## Health & Config
+
+| **Method** | **Endpoint** | **Description** |
+|------------|--------------|-----------------|
+| GET | `/health` | Health check |
+| GET | `/config/system` | System status |
+| GET | `/config/models` | Supported models |
+| GET | `/api/version` | API version |
+| GET | `/api/ping` | Ping |
+
 ## Authentication
 
 | **Method** | **Endpoint** | **Description** |
 |------------|--------------|-----------------|
-| POST | `/api/v1/auth/register` | Register |
-| POST | `/api/v1/auth/login` | Login |
-| POST | `/api/v1/auth/logout` | Logout |
-| POST | `/api/v1/auth/refresh` | Refresh Token |
+| POST | `/auth/register` | Register (rate-limited: 10/min) |
+| POST | `/auth/login` | Login (rate-limited: 10/min) |
+| POST | `/auth/logout` | Logout (rate-limited: 10/min) |
+| POST | `/auth/refresh` | Refresh Token (rate-limited: 10/min) |
+| PUT | `/auth/password` | Update password (rate-limited: 10/min) |
+| PUT | `/auth/profile` | Update profile (rate-limited: 10/min) |
+| DELETE | `/auth/account` | Delete account (rate-limited: 10/min) |
+
+## User
+
+| **Method** | **Endpoint** | **Description** |
+|------------|--------------|-----------------|
+| GET | `/user/profile` | Get user profile (auth required) |
 
 ## LLM & Scoring
 
 | **Method** | **Endpoint** | **Description** |
 |------------|--------------|-----------------|
-| POST | `/api/v1/llm/submit` | Submit Prompt |
-| POST | `/api/v1/llm/score-local` | Local Scoring |
-| GET | `/api/v1/llm/history` | History |
-| GET | `/api/v1/llm/scores` | Scores |
-| GET | `/api/v1/llm/metrics` | Metrics |
-
-## Analytics
-
-| **Method** | **Endpoint** | **Description** |
-|------------|--------------|-----------------|
-| GET | `/api/v1/analytics/overview` | Overview |
-| GET | `/api/v1/analytics/leaderboard` | Leaderboard |
+| POST | `/llm/log/raw-output` | Create log (auth required, 60/min) |
+| GET | `/llm/logs` | Get logs (auth required) |
+| GET | `/llm/logs/:id` | Get single log (auth required) |
+| DELETE | `/llm/logs/:id` | Delete log (auth required) |
+| DELETE | `/llm/logs/clear` | Clear all logs (auth required) |
+| GET | `/llm/analytics` | Get analytics (auth required) |
+| POST | `/llm/score/decision` | Score decision (auth required) |
+| GET | `/llm/export` | Export logs (auth required) |
 
 ---
 
@@ -356,13 +377,24 @@ LOG_LEVEL=debug
 ## Makefile Commands
 
 ```bash
-make up
+make setup        # Install all dependencies
+make db-up        # Start PostgreSQL via Docker
+make db-down      # Stop PostgreSQL
+make run-api      # Run Go backend
+make run-web      # Run Next.js frontend
+make clean        # Remove containers + node_modules
+```
 
-make test
+## Running Tests
 
-make build-backend
+```bash
+# Backend unit + integration tests (requires SQLite)
+cd apps/backend
+CGO_ENABLED=1 go test -race ./...
 
-make build-frontend
+# Frontend tests
+cd apps/frontend
+npm test
 ```
 
 ---

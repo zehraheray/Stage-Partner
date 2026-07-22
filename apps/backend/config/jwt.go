@@ -1,12 +1,23 @@
 package config
 
 import (
-	"time"
 	"errors"
+	"log"
+	"os"
+	"time"
+
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var jwtSecret = []byte("stage_partner_secret_key_2026") // Production'da .env'den çekilir
+var jwtSecret []byte
+
+func InitJWT() {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		log.Fatal("JWT_SECRET ortam değişkeni ayarlanmamış! Lütfen güvenli bir secret tanımlayın.")
+	}
+	jwtSecret = []byte(secret)
+}
 
 type Claims struct {
 	UserID uint   `json:"user_id"`
@@ -14,7 +25,6 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-// Token Oluşturma (24 saat geçerli)
 func GenerateToken(userID uint, email string) (string, error) {
 	expirationTime := time.Now().Add(24 * time.Hour)
 	claims := &Claims{
@@ -30,7 +40,6 @@ func GenerateToken(userID uint, email string) (string, error) {
 	return token.SignedString(jwtSecret)
 }
 
-// Token Doğrulama
 func ValidateToken(tokenString string) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
